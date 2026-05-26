@@ -5,8 +5,55 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
+
+var (
+	fuzzyStrings = []string{"Test",
+		"\x00",
+		"\x00\x00\x00",
+		"\r\n",
+		"\r\nX-Injected: evil",
+		"\x7f",
+		"",
+		" ",
+		"\t",
+		"   ",
+		"%s%s%s%s",
+		"%d%d%d%d",
+		"%x%x%x%x",
+	}
+
+	fuzzyHeaders = []string{"User-Agent",
+		"Referer",
+		"Cookie",
+		"Content-Type",
+		"Authorization",
+		"Origin"}
+
+	fuzzyStringIndex atomic.Uint64
+	fuzzyHeaderIndex atomic.Uint64
+)
+
+type Result struct {
+	Url        string
+	Headers    []string
+	Values     []string
+	StatusCode int
+	Duration   time.Duration
+	Err        error
+}
+
+func nextFuzzerHeader() string {
+	i := fuzzyHeaderIndex.Add(1) - 1
+	return fuzzyHeaders[i%uint64(len(fuzzyHeaders))]
+}
+
+func nextFuzzyString() string {
+	i := fuzzyStringIndex.Add(1) - 1
+	return fuzzyStrings[i%uint64(len(fuzzyStrings))]
+}
 
 func main() {
 
@@ -34,9 +81,9 @@ func main() {
 		}
 	*/
 	for i := 0; i < threadsCount; i++ {
-		go func(url string, headers []string, values []string) {
+		go func(headers []string, values []string) {
 			results <- doRequestWithHeader(url, headers, values)
-		}(url, []string{GetNextFuzzyHeader()}, []string{GetNextFuzzyString()})
+		}([]string{nextFuzzerHeader()}, []string{nextFuzzyString()})
 	}
 
 	for i := 0; i < threadsCount; i++ {
@@ -47,15 +94,6 @@ func main() {
 			fmt.Println("url:", url, "status:", result.StatusCode, "headers:", result.Headers, "values:", result.Values)
 		}
 	}
-}
-
-type Result struct {
-	Url        string
-	Headers    []string
-	Values     []string
-	StatusCode int
-	Duration   time.Duration
-	Err        error
 }
 
 func doRequest(url string) Result {
@@ -71,59 +109,18 @@ func doRequest(url string) Result {
 
 func doRequestWithHeader(url string, headers []string, values []string) Result {
 	before := time.Now()
-	req, _ := http.NewRequest("GET", url, nil)
-	for i := range headers {
-		req.Header.Set(headers[i], values[i])
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return Result{Err: err, Url: url, Headers: headers, Values: values}
 	}
-	client := http.Client{Timeout: 5 * time.Second}
+	for i, header := range headers {
+		req.Header.Set(header, values[i])
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return Result{Err: err, Headers: headers, Values: values, Url: url}
-	} else {
-		defer resp.Body.Close()
-		return Result{StatusCode: resp.StatusCode, Duration: time.Since(before), Headers: headers, Values: values, Url: url}
 	}
-}
-
-var nextFuzzyString int = 0
-var nextFuzzyHeader int = 0
-
-func GetFuzzyStrings() []string {
-	return []string{"Test",
-		"\x00",
-		"\x00\x00\x00",
-		"\r\n",
-		"\r\nX-Injected: evil",
-		"\x7f",
-		"",
-		" ",
-		"\t",
-		"   ",
-		"%s%s%s%s",
-		"%d%d%d%d",
-		"%x%x%x%x",
-	}
-}
-
-func GetNextFuzzyString() string {
-	s := GetFuzzyStrings()
-	r := nextFuzzyString
-	nextFuzzyString = (nextFuzzyString + 1) % len(s)
-	return s[r]
-}
-
-func GetFuzzyHeaders() []string {
-	return []string{"User-Agent",
-		"Referer",
-		"Cookie",
-		"Content-Type",
-		"Authorization",
-		"Origin"}
-}
-
-func GetNextFuzzyHeader() string {
-	s := GetFuzzyHeaders()
-	r := nextFuzzyHeader
-	nextFuzzyHeader = (nextFuzzyHeader + 1) % len(s)
-	return s[r]
+	defer resp.Body.Close()
+	return Result{StatusCode: resp.StatusCode, Duration: time.Since(before), Headers: headers, Values: values, Url: url}
 }
