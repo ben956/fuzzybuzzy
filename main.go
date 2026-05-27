@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -45,7 +50,7 @@ type Result struct {
 	Err        error
 }
 
-func nextFuzzerHeader() string {
+func nextFuzzyHeader() string {
 	i := fuzzyHeaderIndex.Add(1) - 1
 	return fuzzyHeaders[i%uint64(len(fuzzyHeaders))]
 }
@@ -72,6 +77,10 @@ func main() {
 
 	fmt.Println("url:", url)
 	fmt.Println("threadsCount:", threadsCount)
+	FuzzyHeaderTest(threadsCount, url)
+}
+
+func FuzzyHeaderTest(threadsCount int, url string) {
 	results := make(chan Result, threadsCount)
 
 	/*	for i := 0; i < threadsCount; i++ {
@@ -80,13 +89,14 @@ func main() {
 			}(url)
 		}
 	*/
-	for i := 0; i < threadsCount; i++ {
+	for range threadsCount {
 		go func(headers []string, values []string) {
 			results <- doRequestWithHeader(url, headers, values)
-		}([]string{nextFuzzerHeader()}, []string{nextFuzzyString()})
+			//it's ok to put nextFuzzerHeader and nextFuzzyString here
+		}([]string{nextFuzzyHeader()}, []string{nextFuzzyString()})
 	}
 
-	for i := 0; i < threadsCount; i++ {
+	for range threadsCount {
 		result := <-results
 		if result.Err != nil {
 			fmt.Println("url:", url, " error:", result.Err)
@@ -107,20 +117,40 @@ func doRequest(url string) Result {
 	return Result{StatusCode: resp.StatusCode, Duration: duration}
 }
 
-func doRequestWithHeader(url string, headers []string, values []string) Result {
-	before := time.Now()
-	req, err := http.NewRequest("GET", url, nil)
+func doRequestWithHeader(rawUrl string, headers []string, values []string) Result {
+	u, err := url.Parse(rawUrl)
 	if err != nil {
-		return Result{Err: err, Url: url, Headers: headers, Values: values}
+		return Result{Url: rawUrl, Err: err, Headers: headers, Values: values}
 	}
+	host := u.Host
+	if !strings.Contains(host, ":") {
+		host += ":443"
+	}
+	conn, err := net.DialTimeout("tcp", host, 5*time.Second)
+	if err != nil {
+		return Result{Url: rawUrl, Err: err, Headers: headers, Values: values}
+	}
+	defer conn.Close()
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "GET %s HTTP/1.1\r\n", u.RequestURI())
+	fmt.Fprintf(&sb, "HOST: %s\r\n", u.Hostname())
+
 	for i, header := range headers {
-		req.Header.Set(header, values[i])
+		fmt.Fprintf(&sb, "%s: %s\r\n", header, values[i])
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	sb.WriteString("Connection: close\r\n\r\n")
+	log.Println("REQUEST:\n", sb.String())
+	before := time.Now()
+	conn.Write([]byte(sb.String()))
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+
 	if err != nil {
-		return Result{Err: err, Headers: headers, Values: values, Url: url}
+		return Result{Err: err, Headers: headers, Values: values, Url: rawUrl}
 	}
 	defer resp.Body.Close()
-	return Result{StatusCode: resp.StatusCode, Duration: time.Since(before), Headers: headers, Values: values, Url: url}
+	respDump, _ := httputil.DumpResponse(resp, false)
+	log.Printf("RESPONSE: \n%s", respDump)
+	return Result{StatusCode: resp.StatusCode, Duration: time.Since(before), Headers: headers, Values: values, Url: rawUrl}
 }
