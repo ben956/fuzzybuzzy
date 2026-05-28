@@ -1,5 +1,7 @@
 package main
 
+// Package name, the package is effectively folder, all files within a folder share the same package name. No inheritance.
+
 import (
 	"bufio"
 	"flag"
@@ -14,7 +16,10 @@ import (
 	"time"
 )
 
+// aboves are imports, again, they stand for folder name.
+
 var (
+	// the var{} could  be used by shared variables
 	fuzzyStrings = []string{"Test",
 		"\x00",
 		"\x00\x00\x00",
@@ -29,6 +34,7 @@ var (
 		"%d%d%d%d",
 		"%x%x%x%x",
 	}
+	// package only scope
 
 	fuzzyHeaders = []string{"User-Agent",
 		"Referer",
@@ -48,11 +54,16 @@ type Result struct {
 	StatusCode int
 	Duration   time.Duration
 	Err        error
+	Body       string
 }
+
+// data container
 
 func nextFuzzyHeader() string {
 	i := fuzzyHeaderIndex.Add(1) - 1
+	// declare local var
 	return fuzzyHeaders[i%uint64(len(fuzzyHeaders))]
+	// uint64(x) type conversation
 }
 
 func nextFuzzyString() string {
@@ -67,6 +78,7 @@ func main() {
 	flag.StringVar(&url, "url", "", "The URL to test against")
 	flag.IntVar(&threadsCount, "threads", 1, "How many threads to use for the test")
 	flag.Parse()
+	// Golang way to read parameters
 
 	if url == "" {
 		log.Fatal("Invalid URL")
@@ -82,22 +94,22 @@ func main() {
 
 func FuzzyHeaderTest(threadsCount int, url string) {
 	results := make(chan Result, threadsCount)
+	// make a channel
 
-	/*	for i := 0; i < threadsCount; i++ {
-			go func(url string) {
-				results <- doRequest(url)
-			}(url)
-		}
-	*/
 	for range threadsCount {
+		// this for range is a better way of i:=0; i < threadsCount; i++ {}
 		go func(headers []string, values []string) {
+			// go function is start a Golang thread(not computer thread). Be careful about how you pass in the parameters.
 			results <- doRequestWithHeader(url, headers, values)
+			// this send doRequestWithHeader result back to the channel
 			//it's ok to put nextFuzzerHeader and nextFuzzyString here
 		}([]string{nextFuzzyHeader()}, []string{nextFuzzyString()})
 	}
 
+	// fmt.Println("------Results------")
 	for range threadsCount {
 		result := <-results
+		// read from channel
 		if result.Err != nil {
 			fmt.Println("url:", url, " error:", result.Err)
 		} else {
@@ -131,6 +143,7 @@ func doRequestWithHeader(rawUrl string, headers []string, values []string) Resul
 		return Result{Url: rawUrl, Err: err, Headers: headers, Values: values}
 	}
 	defer conn.Close()
+	// similar with finally, be careful about the scope
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "GET %s HTTP/1.1\r\n", u.RequestURI())

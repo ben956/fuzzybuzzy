@@ -1,1 +1,1 @@
-A practice project to learn Golang
+*** A practice project to learn Golang
