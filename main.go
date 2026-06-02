@@ -4,8 +4,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +16,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 // aboves are imports, again, they stand for folder name.
@@ -47,6 +51,9 @@ var (
 	fuzzyHeaderIndex atomic.Uint64
 )
 
+var treeLevel uint
+var MAX_TREE_LEVEL uint = 10
+
 type Result struct {
 	Url        string
 	Headers    []string
@@ -54,7 +61,26 @@ type Result struct {
 	StatusCode int
 	Duration   time.Duration
 	Err        error
-	Body       string
+	Body       io.ReadCloser
+}
+
+type InputInfo struct {
+	Name  string
+	Type  string
+	Value string
+}
+
+type FormInfo struct {
+	Action string
+	Method string
+	Inputs []InputInfo
+}
+
+type PageInfo struct {
+	Url   string
+	Links []string
+	Form  []FormInfo
+	Input []InputInfo
 }
 
 // data container
@@ -89,7 +115,16 @@ func main() {
 
 	fmt.Println("url:", url)
 	fmt.Println("threadsCount:", threadsCount)
-	FuzzyHeaderTest(threadsCount, url)
+	//FuzzyHeaderTest(threadsCount, url)
+	r := doRequest(url)
+	if r.Err != nil {
+		log.Fatal("Fail to connect", url)
+	}
+	n, err := parseHtml(r.Body)
+	if err != nil {
+		log.Fatal("Fail to parse. err:", err)
+	}
+	walk(n, 1)
 }
 
 func FuzzyHeaderTest(threadsCount int, url string) {
@@ -118,6 +153,98 @@ func FuzzyHeaderTest(threadsCount int, url string) {
 	}
 }
 
+func parseHtml(body io.ReadCloser) (*html.Node, error) {
+	defer body.Close()
+	return html.Parse(body)
+}
+
+// Non-recrusively find Input under the input node and return array of InputInfo
+func getInputInfo(n *html.Node) []InputInfo {
+	ret := []InputInfo{}
+	if n == nil {
+		return ret
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.Data == "input" {
+			var name, t, v string
+			for _, a := range c.Attr {
+				switch a.Key {
+				case "name":
+					name = a.Val
+				case "type":
+					t = a.Val
+				case "value":
+					v = a.Val
+				}
+			}
+			ret = append(ret, InputInfo{Type: t, Name: name, Value: v})
+		}
+	}
+	return ret
+}
+
+// extract FormInfo from the input n, the n should be a Form
+func getFormInfo(n *html.Node) (FormInfo, error) {
+	var ret FormInfo
+	if n == nil || n.Data != "form" {
+		return ret, errors.New("The input is not a form")
+	}
+	var action, method string
+	for _, attr := range n.Attr {
+		switch attr.Key {
+		case "action":
+			action = attr.Val
+		case "method":
+			method = attr.Val
+
+		}
+	}
+	return FormInfo{Method: method, Action: action, Inputs: getInputInfo(n)}, nil
+
+}
+
+func parsePageInfo(n *html.Node, url string) PageInfo {
+
+	var ret PageInfo
+	var walk func(m *html.Node, level uint)
+
+	walk = func(n *html.Node, level uint) {
+		if level >= MAX_TREE_LEVEL {
+			//fmt.Println("reach max level ", level)
+			return
+		}
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "a":
+				for _, a := range n.Attr {
+					if a.Key == "href" {
+						fmt.Println(strings.Repeat(" ", int(level)), "level:", level, "href:", a.Val)
+						ret.Links = append(ret.Links, a.Val)
+					}
+				}
+
+			case "form":
+				form, error := getFormInfo(n)
+				if error != nil {
+					fmt.Println("Fail to process form:", n)
+				}
+				ret.Form = append(ret.Form, form)
+
+			case "input":
+				inputs := getInputInfo(n)
+				ret.Input = append(ret.Input, inputs...)
+
+			}
+		}
+
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c, level+1)
+		}
+	}
+	return ret
+
+}
+
 func doRequest(url string) Result {
 	start := time.Now()
 	resp, err := http.Get(url)
@@ -125,8 +252,7 @@ func doRequest(url string) Result {
 	if err != nil {
 		return Result{Err: err, Duration: duration}
 	}
-	defer resp.Body.Close()
-	return Result{StatusCode: resp.StatusCode, Duration: duration}
+	return Result{StatusCode: resp.StatusCode, Duration: duration, Body: resp.Body}
 }
 
 func doRequestWithHeader(rawUrl string, headers []string, values []string) Result {
